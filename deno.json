@@ -1,0 +1,10 @@
+{
+  "imports": {
+    "chess.js": "npm:chess.js@^1.2.0",
+    "fp-ts": "npm:fp-ts@^2.16.10",
+    "fp-ts-contrib": "npm:fp-ts-contrib@^0.1.29"
+  },
+  "tasks": {
+    "uci": "deno run --allow-net --allow-env app/main.ts"
+  }
+}

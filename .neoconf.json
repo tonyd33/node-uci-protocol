@@ -1,0 +1,6 @@
+{
+  "lspconfig": {
+    "denols": {"enable":true},
+    "ts_ls": false
+  }
+}
