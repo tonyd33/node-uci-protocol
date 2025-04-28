@@ -271,38 +271,6 @@ class UCIProxyHandler implements UCIHandler {
   }
 }
 
-function main() {
-  const shouldLog = process.argv.includes("--debug");
-  const debugLogPath = shouldLog ? "/tmp/uci-adapter-debug.log" : "/dev/null";
-
-  const debugLogStrm = fs.createWriteStream(debugLogPath, { flags: "a" });
-
-  const stdoutTee = teePrefixedStream(process.stdout, debugLogStrm, "[>>>]: ");
-  const stderrTee = teePrefixedStream(process.stderr, debugLogStrm, "[>->]: ");
-  const stdinTap = tapPrefixedStream(process.stdin, debugLogStrm, "[<<<]: ");
-  const debugStrm = prefixStream(debugLogStrm, "[>~>]: ");
-
-  const { listen, sendInfo, sendBestMove } = prepare({
-    input: stdinTap,
-    output: stdoutTee,
-    error: stderrTee,
-  });
-
-  const handler = new UCIProxyHandler({
-    name: "Gnomes",
-    author: "Gnomes",
-    advertiseOptions: [],
-    robotUrl: "http://localhost:8000/move",
-    sendInfo,
-    sendBestMove,
-    debugLog: (s) => debugStrm.write(s),
-  });
-
-  listen(handler);
-}
-
-main();
-
 // bunch of jank below for detailed logs lol
 
 const prefixChunk =
@@ -361,3 +329,35 @@ const prefixStream = (
       ostream.write(prefixChunk(prefix)(chunk), callback);
     },
   });
+
+function main() {
+  const shouldLog = process.argv.includes("--debug");
+  const debugLogPath = shouldLog ? "/tmp/uci-adapter-debug.log" : "/dev/null";
+
+  const debugLogStrm = fs.createWriteStream(debugLogPath, { flags: "a" });
+
+  const stdoutTee = teePrefixedStream(process.stdout, debugLogStrm, "[>>>]: ");
+  const stderrTee = teePrefixedStream(process.stderr, debugLogStrm, "[>->]: ");
+  const stdinTap = tapPrefixedStream(process.stdin, debugLogStrm, "[<<<]: ");
+  const debugStrm = prefixStream(debugLogStrm, "[>~>]: ");
+
+  const { listen, sendInfo, sendBestMove } = prepare({
+    input: stdinTap,
+    output: stdoutTee,
+    error: stderrTee,
+  });
+
+  const handler = new UCIProxyHandler({
+    name: "Gnomes",
+    author: "Gnomes",
+    advertiseOptions: [],
+    robotUrl: "http://localhost:8000/move",
+    sendInfo,
+    sendBestMove,
+    debugLog: (s) => debugStrm.write(s),
+  });
+
+  listen(handler);
+}
+
+main();
