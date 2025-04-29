@@ -1,5 +1,7 @@
 // deno-lint-ignore-file require-await
+import path from "node:path";
 import process from "node:process";
+import child_process from "node:child_process";
 import {
   info,
   prepare,
@@ -60,6 +62,11 @@ class UCIProxyHandler implements UCIHandler {
    */
   private robotRequest?: Promise<string>;
 
+  /** fuck */
+  private onQuit_: () => Promise<void>;
+  /** lol */
+  private onStartup: () => Promise<void>;
+
   constructor(
     {
       name,
@@ -70,6 +77,8 @@ class UCIProxyHandler implements UCIHandler {
       sendBestMove,
       debugLog,
       defaultMoveTimeoutMs = 5000,
+      onQuit,
+      onStartup,
     }: {
       name: string;
       author: string;
@@ -79,6 +88,8 @@ class UCIProxyHandler implements UCIHandler {
       sendBestMove: (move: string, ponder?: undefined) => Promise<void>;
       debugLog?: (s: string) => void;
       defaultMoveTimeoutMs?: number;
+      onQuit: () => Promise<void>;
+      onStartup: () => Promise<void>;
     },
   ) {
     this.name = name;
@@ -95,6 +106,9 @@ class UCIProxyHandler implements UCIHandler {
     this.logDebug = debugLog ?? (() => {});
     this.abortController = new AbortController();
 
+    this.onQuit_ = onQuit;
+    this.onStartup = onStartup;
+
     this.onInit = this.onInit.bind(this);
     this.onReadyProbe = this.onReadyProbe.bind(this);
     this.onDebug = this.onDebug.bind(this);
@@ -108,6 +122,7 @@ class UCIProxyHandler implements UCIHandler {
   }
 
   async onInit() {
+    await this.onStartup();
     this.initialized = true;
 
     return {
@@ -231,16 +246,16 @@ class UCIProxyHandler implements UCIHandler {
       .then((res) => res.text());
     // Create a promise that always times out. We race this robot request
     // against this
-    const timeoutMs = params.find((param) => param.tag === "MoveTime")?.time ??
-      this.defaultMoveTimeoutMs;
-    const timeoutPromise: Promise<string> = new Promise(
-      (_, reject) =>
-        setTimeout(
-          () => reject(new Error(`Timeout of ${timeoutMs}ms reached`)),
-          timeoutMs,
-        ),
-    );
-    this.robotRequest = Promise.race([realRobotRequest, timeoutPromise]);
+    // const timeoutMs = params.find((param) => param.tag === "MoveTime")?.time ??
+    //   this.defaultMoveTimeoutMs;
+    // const timeoutPromise: Promise<string> = new Promise(
+    //   (_, reject) =>
+    //     setTimeout(
+    //       () => reject(new Error(`Timeout of ${timeoutMs}ms reached`)),
+    //       timeoutMs,
+    //     ),
+    // );
+    this.robotRequest = Promise.race([realRobotRequest /* ,timeoutPromise */]);
 
     try {
       this.logDebug("Asking robot");
@@ -267,6 +282,7 @@ class UCIProxyHandler implements UCIHandler {
   }
   async onPonderHit() {}
   async onQuit() {
+    this.onQuit_();
     process.exit(0);
   }
 }
@@ -274,7 +290,7 @@ class UCIProxyHandler implements UCIHandler {
 // bunch of jank below for detailed logs lol
 
 const prefixChunk =
-  (prefix: string, timestamped?: boolean = true) => (chunk: any) => {
+  (prefix: string, timestamped: boolean = true) => (chunk: any) => {
     const now = new Date();
     const timestamp = timestamped
       ? `[${now.getHours().toString().padStart(2, "0")}:${
@@ -330,7 +346,52 @@ const prefixStream = (
     },
   });
 
-function main() {
+async function setupRobot() {
+  const robot = child_process.spawn("gleam", ["run"], {
+    cwd: path.join(
+      new URL(".", import.meta.url).pathname,
+      "../../../erlang_template",
+    ),
+    env: process.env,
+    detached: true,
+  });
+  if (!robot.pid) {
+    process.stderr.write("Failed to spawn robot\n");
+    process.exit(1);
+  }
+  // Make sure this typechecks as a number for later
+  const robotPid = robot.pid;
+
+  const errorIfClosedEarly = () => {
+    process.stdout.write("Robot failed to start\n");
+    process.exit(1);
+  };
+  robot.on("close", errorIfClosedEarly);
+  await new Promise<void>((resolve) => robot.stdout.on("data", resolve));
+  robot.removeListener("close", errorIfClosedEarly);
+
+  const exitGracefully = async () => {
+    process.stderr.write("Exiting gracefully...\n");
+    const death = new Promise((resolve) => robot.on("close", resolve));
+    const timeout = new Promise<void>((resolve) =>
+      setTimeout(() => {
+        process.stderr.write("Robot didn't die before timeout\n");
+        resolve();
+      }, 5000)
+    );
+    // Kill process group. Works only on unix
+    process.kill(-robotPid);
+    await Promise.race([death, timeout]);
+    process.stderr.write("Done.\n");
+    process.exit(0);
+  };
+  process.on("SIGINT", exitGracefully);
+  process.on("SIGTERM", exitGracefully);
+
+  return exitGracefully;
+}
+
+async function main() {
   const shouldLog = process.argv.includes("--debug");
   const debugLogPath = shouldLog ? "/tmp/uci-adapter-debug.log" : "/dev/null";
 
@@ -340,6 +401,23 @@ function main() {
   const stderrTee = teePrefixedStream(process.stderr, debugLogStrm, "[>->]: ");
   const stdinTap = tapPrefixedStream(process.stdin, debugLogStrm, "[<<<]: ");
   const debugStrm = prefixStream(debugLogStrm, "[>~>]: ");
+
+  // holy fuck this is cursed.
+  //
+  // We can't block early, otherwise we'll "miss" handling the "uci" command,
+  // and the SPRT runner will think we're unresponsive and kill us.
+  // The graceful exit handler can only be retrieved after awaiting the
+  // setupRobot promise though and we have to pass this handler to onQuit.
+  // To do so, we have to thunk-ify the handler.
+  //
+  // Really, this is in need of an architecture improvement, but I can't be
+  // bothered.
+  // - Tony
+  const setupRobotPromise = setupRobot();
+  const exitGracefully = async () => {
+    const f = await setupRobotPromise;
+    return f();
+  };
 
   const { listen, sendInfo, sendBestMove } = prepare({
     input: stdinTap,
@@ -355,6 +433,10 @@ function main() {
     sendInfo,
     sendBestMove,
     debugLog: (s) => debugStrm.write(s),
+    onQuit: exitGracefully,
+    onStartup: async () => {
+      await setupRobotPromise;
+    },
   });
 
   listen(handler);
